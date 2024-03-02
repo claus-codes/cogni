@@ -7,7 +7,9 @@
  * @author 2023 Claus Nuoskanen
  */
 
-import { DefaultRecord, ResultObject } from "./index";
+import { DefaultRecord, ResultObject } from './index';
+
+export type AsyncResultObject<T> = { [K in keyof T]: Promise<T[K]> };
 
 /**
  * Interface for computation functions within cogniAsync's dependency graph.
@@ -34,7 +36,18 @@ export interface AsyncComputeFunction<
    * @param parents - Object containing previously computed values.
    * @returns The computed value.
    */
-  (param: TParam, parents: ResultObject<TResult>): Promise<ReturnType> | ReturnType;
+  (
+    param: TParam,
+    parents: ResultObject<TResult>,
+  ): Promise<ReturnType> | ReturnType;
+}
+
+interface AsyncComputeFunctionInternal<
+  TParam extends DefaultRecord = DefaultRecord,
+  TResult extends DefaultRecord = DefaultRecord,
+  ReturnType = TResult[keyof TResult],
+> {
+  (param: TParam, parents: AsyncResultObject<TResult>): Promise<ReturnType>;
 }
 
 /**
@@ -98,6 +111,14 @@ export type cogniAsync<
   ) => Promise<ResultObject<TResult>>;
 };
 
+function resultToAsyncResult<TResult>(
+  result: ResultObject<TResult>,
+): AsyncResultObject<TResult> {
+  return Object.fromEntries(
+    Object.entries(result).map(([key, value]) => [key, Promise.resolve(value)]),
+  ) as AsyncResultObject<TResult>;
+}
+
 function cogniAsync<
   TParam extends Record<string, unknown> = DefaultRecord,
   TResult extends Record<string, unknown> = DefaultRecord,
@@ -108,7 +129,7 @@ function cogniAsync<
    */
   const fnMap: Map<
     keyof TResult,
-    AsyncComputeFunction<TParam, TResult, TResult[keyof TResult]>
+    AsyncComputeFunctionInternal<TParam, TResult, TResult[keyof TResult]>
   > = new Map();
 
   function define<K extends keyof TResult>(
@@ -128,7 +149,7 @@ function cogniAsync<
     });
 
     // Add the compute function to the map.
-    fnMap.set(key, parentKeys ? wrap(fn, parentKeys) : fn);
+    fnMap.set(key, wrap(fn, parentKeys ?? []));
   }
 
   async function get<K extends keyof TResult>(
@@ -141,6 +162,19 @@ function cogniAsync<
       return results[key];
     }
 
+    return getInternal(key, param, resultToAsyncResult(results));
+  }
+
+  async function getInternal<K extends keyof TResult>(
+    key: K,
+    param: TParam,
+    results: AsyncResultObject<TResult> = {} as AsyncResultObject<TResult>,
+  ): Promise<TResult[K]> {
+    const result = results[key];
+    if (result !== undefined) {
+      return await result;
+    }
+
     // Validate key existence and dependency resolution.
     const fn = fnMap.get(key);
     if (!fn) {
@@ -148,14 +182,22 @@ function cogniAsync<
     }
 
     // Compute and cache the result.
-    results[key] = await fn(param, results) as TResult[K];
-    return results[key];
+    results[key] = fn(param, results) as Promise<TResult[K]>;
+    return await results[key];
   }
 
   async function getMany(
     keys: Array<keyof TResult>,
     param: TParam,
     results: ResultObject<TResult> = {} as ResultObject<TResult>,
+  ): Promise<ResultObject<TResult>> {
+    return getManyInternal(keys, param, resultToAsyncResult(results));
+  }
+
+  async function getManyInternal(
+    keys: Array<keyof TResult>,
+    param: TParam,
+    results: AsyncResultObject<TResult> = {} as AsyncResultObject<TResult>,
   ): Promise<ResultObject<TResult>> {
     return await asyncDependencyResolver(keys, param, results);
   }
@@ -171,16 +213,20 @@ function cogniAsync<
   function wrap<ReturnType>(
     fn: AsyncComputeFunction<TParam, TResult, ReturnType>,
     parentKeys: Array<keyof TResult>,
-  ): AsyncComputeFunction<TParam, TResult, ReturnType> {
-    return async (param: TParam, results: ResultObject<TResult>): Promise<ReturnType> => {
-      const parents = await getMany(parentKeys, param, results);
+  ): AsyncComputeFunctionInternal<TParam, TResult, ReturnType> {
+    return async (
+      param: TParam,
+      results: AsyncResultObject<TResult>,
+    ): Promise<ReturnType> => {
+      const parents = await getManyInternal(parentKeys, param, results);
       return await fn(param, parents);
-    }
+    };
   }
 
   /**
    * Resolves dependencies and computes values asynchronously for specified keys using an instance of cogniAsync.
-   * It executes the computations for the provided keys sequentially, ensuring each computation is completed before the next one begins.
+   * It executes the computations for the provided keys in parallel where possible, while ensuring dependent computations
+   * are scheduled sequentially.
    *
    * @template TParam - The type for input parameters used in computation functions.
    * @template TResult - The type for the expected output results from computation functions.
@@ -195,21 +241,24 @@ function cogniAsync<
   async function asyncDependencyResolver(
     keys: Array<keyof TResult>,
     param: TParam,
-    results: ResultObject<TResult> = {} as ResultObject<TResult>,
+    results: AsyncResultObject<TResult> = {} as AsyncResultObject<TResult>,
   ): Promise<ResultObject<TResult>> {
     // Iterate over keys.
-    for (const key of keys) {
-      // Check if the key has already been resolved.
+    const myResults = keys.map(async (key) => {
       if (!results[key]) {
-        try {
-          // Resolve the key and cache the result.
-          results[key] = await get(key, param, results);
-        } catch (error) {
-          throw new Error(`Failed to resolve dependencies for key "${key as string}": ${error}`);
-        }
+        // Resolve the key and cache the result.
+        results[key] = getInternal(key, param, results).catch((error) => {
+          throw new Error(
+            `Failed to resolve dependencies for key "${
+              key as string
+            }": ${error}`,
+          );
+        });
       }
-    }
-    return results;
+      return [key, await results[key]] as const;
+    });
+    const resolvedResults = await Promise.all(myResults);
+    return Object.fromEntries(resolvedResults) as ResultObject<TResult>;
   }
 
   return {
