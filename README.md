@@ -2,7 +2,7 @@
 
 `cogni` is a TypeScript utility for efficient management of computed values in dependency trees, ideal for scenarios like game development and dynamic content generation. It minimizes redundant computations, ensuring compute functions are called as needed.
 
-- **Version:** 1.1.3
+- **Version:** 1.2.0
 
 ## Key Features
 - **Efficient Dependency Management**: Streamlines the management of computed values in dependency trees.
@@ -317,6 +317,10 @@ This example illustrates how [`cogniMemo`](API-reference.md#cognimemo) can be us
 
 ## Detailed API Reference
 For a comprehensive understanding of all the functionalities, types, and methods available in cogni, please refer to the [API Reference](API-reference.md).
+
+## Contributors
+- [Claus Nuoskanen](https://github.com/claus-codes)
+- [Lucas Treffenstädt](https://github.com/mithodin)
 
 ## License
 
